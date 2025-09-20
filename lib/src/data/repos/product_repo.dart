@@ -2,6 +2,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:isar/isar.dart';
 import '../../models/product.dart';
 import '../local/isar_service.dart';
+// ✅ Stock hareketi kaydı için:
+import '../../models/stock_movement.dart';
 
 final productRepoProvider =
     Provider<ProductRepo>((ref) => ProductRepo(ref.read(isarProvider)));
@@ -18,6 +20,13 @@ class ProductRepo {
         if (prod != null) {
           prod.stockQty += initialQty;
           await isar.products.put(prod);
+          // hareket
+          final m = StockMovement()
+            ..productId = id
+            ..delta = initialQty
+            ..reason = 'initial'
+            ..createdAt = DateTime.now();
+          await isar.stockMovements.put(m);
         }
       }
       return id;
@@ -29,7 +38,6 @@ class ProductRepo {
 
   Future<List<Product>> all() => isar.products.where().sortByName().findAll();
 
-  // İsim VEYA barkoda göre arama
   Future<List<Product>> search(String q) => isar.products
       .filter()
       .group((g) => g
@@ -43,4 +51,21 @@ class ProductRepo {
       .filter()
       .barcodeEqualTo(code, caseSensitive: false)
       .findFirst();
+
+  // ✅ Yeni: stok düzeltme (+/-) ve hareket kaydı
+  Future<void> adjustStock(int productId, int delta, String reason) async {
+    await isar.writeTxn(() async {
+      final p = await isar.products.get(productId);
+      if (p == null) return;
+      p.stockQty += delta;
+      await isar.products.put(p);
+
+      final m = StockMovement()
+        ..productId = productId
+        ..delta = delta
+        ..reason = reason
+        ..createdAt = DateTime.now();
+      await isar.stockMovements.put(m);
+    });
+  }
 }

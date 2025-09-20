@@ -10,12 +10,22 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.8
+  google_fonts: ^6.1.0
   flutter_riverpod: ^2.5.1
   isar: ^3.1.0+1
   isar_flutter_libs: ^3.1.0+1
   path_provider: ^2.1.4
-  mobile_scanner: ^6.0.2
+  mobile_scanner: ^3.5.7
   intl: ^0.19.0
+  pdf: ^3.11.0
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+  image_picker: ^1.0.7
+  crypto: ^3.0.3
+  excel: ^4.0.3
+  fl_chart: ^0.68.0
+  shared_preferences: ^2.3.2
+  file_picker: ^8.0.3
 
 dev_dependencies:
   flutter_test:
