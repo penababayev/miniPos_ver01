@@ -3,597 +3,556 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:isar/isar.dart';
 
 import '../../data/local/isar_service.dart';
+import '../../core/auth_controller.dart';
+import '../../models/app_user.dart';
 import '../../models/product.dart';
-
-// Yalnızca yöneticiye gösterilecek widget (FAB ve menü öğeleri için)
-import 'widgets/manager_only.dart';
 
 class ProductsListPage extends ConsumerStatefulWidget {
   const ProductsListPage({super.key});
+
   @override
   ConsumerState<ProductsListPage> createState() => _ProductsListPageState();
 }
 
 class _ProductsListPageState extends ConsumerState<ProductsListPage> {
-  final _searchCtl = TextEditingController();
-  String _query = '';
-
-  List<Product> _all = [];
+  final _q = TextEditingController();
   bool _loading = true;
+  List<Product> _items = [];
 
   @override
   void initState() {
     super.initState();
-    _reload();
+    _load();
+    _q.addListener(_load);
   }
 
   @override
   void dispose() {
-    _searchCtl.dispose();
+    _q.dispose();
     super.dispose();
   }
 
-  Future<void> _reload() async {
+  Isar get _isar => ref.read(isarProvider);
+
+  Future<void> _load() async {
     setState(() => _loading = true);
-    final isar = ref.read(isarProvider);
-    final items = await isar.products.where().findAll();
-    // İsim alanı yoksa da patlamasın diye güvenli karşılaştırma
-    items.sort(
-        (a, b) => _nameOf(a).toLowerCase().compareTo(_nameOf(b).toLowerCase()));
+
+    final all = await _isar.products
+        .where()
+        .findAll(); // sortByName kullanma -> her modelde yok
+    final text = _q.text.trim().toLowerCase();
+
+    List<Product> list = all;
+    if (text.isNotEmpty) {
+      list = all.where((p) {
+        final name =
+            (_get<String>(p, const ['name', 'title', 'productName']) ?? '')
+                .toLowerCase();
+        final bc = (_get<String>(
+                    p, const ['barcode', 'barCode', 'ean', 'sku', 'code']) ??
+                '')
+            .toLowerCase();
+        return name.contains(text) || bc.contains(text);
+      }).toList();
+    }
+
+    list.sort((a, b) {
+      final an = _get<String>(a, const ['name', 'title', 'productName']) ?? '';
+      final bn = _get<String>(b, const ['name', 'title', 'productName']) ?? '';
+      return an.compareTo(bn);
+    });
+
     setState(() {
-      _all = items;
+      _items = list;
       _loading = false;
     });
   }
 
-  List<Product> get _filtered {
-    final q = _query.trim().toLowerCase();
-    return _all.where((p) {
-      if (q.isEmpty) return true;
-      final name = _nameOf(p).toLowerCase();
-      final barcode = (_barcodeOf(p) ?? '').toLowerCase();
-      return name.contains(q) || barcode.contains(q);
-    }).toList();
+  Future<void> _addOrEdit({Product? product}) async {
+    final ok = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => ProductEditorSheet(initial: product),
+    );
+    if (ok == true) {
+      await _load();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+            content:
+                Text(product == null ? 'Ürün eklendi' : 'Ürün güncellendi')),
+      );
+    }
   }
 
   Future<void> _delete(Product p) async {
-    final isar = ref.read(isarProvider);
-    await isar.writeTxn(() async {
-      await isar.products.delete(p.id);
-    });
-    if (mounted) {
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Silindi: ${_nameOf(p)}')));
-    }
-    _reload();
-  }
-
-  Future<void> _openEditor({Product? existing}) async {
-    await showDialog(
+    final yes = await showDialog<bool>(
       context: context,
-      builder: (_) => _ProductEditorDialog(
-        existing: existing,
-        onSaved: _reload,
+      builder: (_) => AlertDialog(
+        title: const Text('Silinsin mi?'),
+        content: Text('"${_get<String>(p, const [
+                  'name'
+                ]) ?? '(adsız)'}" ürünü silinecek.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('İptal')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Sil')),
+        ],
       ),
     );
+    if (yes != true) return;
+    await _isar.writeTxn(() async => _isar.products.delete(p.id));
+    _load();
   }
 
   @override
   Widget build(BuildContext context) {
-    final list = _filtered;
+    final me = ref.watch(authControllerProvider).user;
+    final canEdit = me?.role == UserRole.manager;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Ürünler')),
-      body: Column(
-        children: [
-          // Arama
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
-            child: TextField(
-              controller: _searchCtl,
-              decoration: InputDecoration(
-                hintText: 'Ürün adı veya barkod ara',
-                prefixIcon: const Icon(Icons.search),
-                suffixIcon: _query.isEmpty
-                    ? null
-                    : IconButton(
-                        onPressed: () {
-                          _searchCtl.clear();
-                          setState(() => _query = '');
-                        },
-                        icon: const Icon(Icons.close),
-                      ),
-              ),
-              onChanged: (v) => setState(() => _query = v),
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Text('Ürünler',
+                    style:
+                        TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                const Spacer(),
+                if (canEdit)
+                  FilledButton.icon(
+                    onPressed: () => _addOrEdit(),
+                    icon: const Icon(Icons.add),
+                    label: const Text('Yeni Ürün'),
+                  ),
+              ],
             ),
-          ),
-          const SizedBox(height: 4),
-
-          Expanded(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : list.isEmpty
-                    ? const Center(child: Text('Ürün bulunamadı'))
-                    : ListView.separated(
-                        itemCount: list.length,
-                        separatorBuilder: (_, __) => const Divider(height: 1),
-                        itemBuilder: (_, i) {
-                          final p = list[i];
-                          return ListTile(
-                            leading: CircleAvatar(
-                              child: Text(
-                                _nameOf(p).isNotEmpty
-                                    ? _nameOf(p).characters.first.toUpperCase()
-                                    : '?',
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.w700),
-                              ),
-                            ),
-                            title: Text(_nameOf(p)),
-                            subtitle: Text([
-                              if ((_barcodeOf(p) ?? '').isNotEmpty)
-                                'Barkod: ${_barcodeOf(p)}',
-                              if (_costOf(p) != null)
-                                'Maliyet: ${_costOf(p)!.toStringAsFixed(2)}',
-                            ].join('   •   ')),
-                            trailing: Wrap(
-                              crossAxisAlignment: WrapCrossAlignment.center,
-                              spacing: 6,
-                              children: [
-                                Chip(
-                                    label: Text(
-                                        '₺${_priceOf(p).toStringAsFixed(2)}')),
-                                // Yalnızca yöneticiye göster: düzenle/sil
-                                ManagerOnly(
-                                  child: PopupMenuButton<String>(
-                                    onSelected: (v) {
-                                      if (v == 'edit') _openEditor(existing: p);
-                                      if (v == 'delete') _confirmDelete(p);
-                                    },
-                                    itemBuilder: (_) => const [
-                                      PopupMenuItem(
-                                          value: 'edit',
-                                          child: Text('Düzenle')),
-                                      PopupMenuItem(
-                                          value: 'delete', child: Text('Sil')),
-                                    ],
-                                  ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _q,
+              decoration: InputDecoration(
+                prefixIcon: const Icon(Icons.search),
+                hintText: 'Ürün adı veya barkod ara',
+                filled: true,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(24),
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _items.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Text('Ürün bulunamadı'),
+                              const SizedBox(height: 8),
+                              if (canEdit)
+                                OutlinedButton.icon(
+                                  onPressed: () => _addOrEdit(),
+                                  icon: const Icon(Icons.add),
+                                  label: const Text('İlk ürünü ekle'),
                                 ),
-                              ],
-                            ),
-                            onTap: () => _openEditor(existing: p),
-                          );
-                        },
-                      ),
-          ),
-        ],
-      ),
+                            ],
+                          ),
+                        )
+                      : ListView.separated(
+                          itemCount: _items.length,
+                          separatorBuilder: (_, __) => const Divider(height: 1),
+                          itemBuilder: (_, i) {
+                            final p = _items[i];
+                            final name = _get<String>(p,
+                                    const ['name', 'title', 'productName']) ??
+                                '(adsız)';
+                            final barcode = _get<String>(p, const [
+                              'barcode',
+                              'barCode',
+                              'ean',
+                              'sku',
+                              'code'
+                            ]);
+                            final unit = _get<String>(p, const [
+                                  'unit',
+                                  'uom',
+                                  'measure',
+                                  'measureUnit'
+                                ]) ??
+                                '';
+                            final price = (_get<num>(p, const [
+                                  'price',
+                                  'sellingPrice',
+                                  'salePrice',
+                                  'unitPrice',
+                                  'listPrice'
+                                ])?.toDouble()) ??
+                                0.0;
 
-      // 🔒 Yalnızca yönetici görebilir
-      floatingActionButton: const ManagerOnly(
-        child: _AddFab(),
+                            return ListTile(
+                              leading: const Icon(Icons.inventory_2),
+                              title: Text(name),
+                              subtitle: Text([
+                                if ((barcode ?? '').isNotEmpty)
+                                  'Barkod: $barcode',
+                                if (unit.isNotEmpty) 'Birim: $unit',
+                              ].join(' • ')),
+                              trailing: Text(price.toStringAsFixed(2)),
+                              onTap:
+                                  canEdit ? () => _addOrEdit(product: p) : null,
+                              onLongPress: canEdit ? () => _delete(p) : null,
+                            );
+                          },
+                        ),
+            ),
+          ],
+        ),
       ),
+      floatingActionButton: canEdit
+          ? FloatingActionButton.extended(
+              onPressed: () => _addOrEdit(),
+              icon: const Icon(Icons.add),
+              label: const Text('Ürün'),
+            )
+          : null,
     );
-  }
-
-  void _confirmDelete(Product p) {
-    showDialog(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Ürünü sil'),
-        content: Text('"${_nameOf(p)}" kalıcı olarak silinsin mi?'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('İptal')),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _delete(p);
-            },
-            child: const Text('Sil'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ====== FIELD ADAPTERS (alan adları farklı olduğunda derleme hatası vermeden çalışır) ======
-
-  String _nameOf(Product p) {
-    // name alanı yoksa diğer muhtemel adlara bak
-    try {
-      final d = p as dynamic;
-      final v = d.name ?? d.title ?? d.productName;
-      if (v is String) return v;
-    } catch (_) {}
-    return ''; // fallback
-  }
-
-  String? _barcodeOf(Product p) {
-    try {
-      final d = p as dynamic;
-      final v = d.barcode ?? d.barCode ?? d.ean ?? d.ean13 ?? d.sku ?? d.code;
-      if (v is String) return v;
-    } catch (_) {}
-    return null;
-  }
-
-  double _priceOf(Product p) {
-    try {
-      final d = p as dynamic;
-      final v = d.price ??
-          d.sellingPrice ??
-          d.salePrice ??
-          d.unitPrice ??
-          d.listPrice;
-      if (v is num) return v.toDouble();
-    } catch (_) {}
-    return 0.0;
-  }
-
-  double? _costOf(Product p) {
-    try {
-      final d = p as dynamic;
-      final v = d.costPrice ?? d.buyPrice ?? d.purchasePrice ?? d.cost;
-      if (v is num) return v.toDouble();
-    } catch (_) {}
-    return null;
-  }
-
-  void _setPrice(Product p, double price) {
-    final d = p as dynamic;
-    for (final key in [
-      'price',
-      'sellingPrice',
-      'salePrice',
-      'unitPrice',
-      'listPrice'
-    ]) {
-      try {
-        // ignore: invalid_use_of_protected_member
-        d.noSuchMethod; // sadece dynamic kaldıgını garanti etmek için erişim
-        // atama dene
-        switch (key) {
-          case 'price':
-            d.price = price;
-            return;
-          case 'sellingPrice':
-            d.sellingPrice = price;
-            return;
-          case 'salePrice':
-            d.salePrice = price;
-            return;
-          case 'unitPrice':
-            d.unitPrice = price;
-            return;
-          case 'listPrice':
-            d.listPrice = price;
-            return;
-        }
-      } catch (_) {/* diğer ismi dene */}
-    }
-  }
-
-  void _setCost(Product p, double cost) {
-    final d = p as dynamic;
-    for (final key in ['costPrice', 'buyPrice', 'purchasePrice', 'cost']) {
-      try {
-        switch (key) {
-          case 'costPrice':
-            d.costPrice = cost;
-            return;
-          case 'buyPrice':
-            d.buyPrice = cost;
-            return;
-          case 'purchasePrice':
-            d.purchasePrice = cost;
-            return;
-          case 'cost':
-            d.cost = cost;
-            return;
-        }
-      } catch (_) {}
-    }
-  }
-
-  void _setCreatedAt(Product p) {
-    try {
-      final d = p as dynamic;
-      d.createdAt = DateTime.now();
-    } catch (_) {
-      // alan yoksa yok say
-    }
   }
 }
 
-class _AddFab extends ConsumerWidget {
-  const _AddFab();
+/// Ürün ekleme/düzenleme sayfası (bottom sheet)
+class ProductEditorSheet extends ConsumerStatefulWidget {
+  const ProductEditorSheet({super.key, this.initial});
+  final Product? initial;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return FloatingActionButton(
-      onPressed: () {
-        showDialog(
-          context: context,
-          builder: (_) => _ProductEditorDialog(
-            existing: null,
-            onSaved: () {},
-          ),
-        );
-      },
-      child: const Icon(Icons.add),
-    );
-  }
+  ConsumerState<ProductEditorSheet> createState() => _ProductEditorSheetState();
 }
 
-// ------------------ ÜRÜN EDITÖR DİYALOGU (dinamik alan destekli) ------------------
-
-class _ProductEditorDialog extends ConsumerStatefulWidget {
-  const _ProductEditorDialog({required this.onSaved, this.existing});
-  final Product? existing;
-  final VoidCallback onSaved;
-
-  @override
-  ConsumerState<_ProductEditorDialog> createState() =>
-      _ProductEditorDialogState();
-}
-
-class _ProductEditorDialogState extends ConsumerState<_ProductEditorDialog> {
+class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
   final _form = GlobalKey<FormState>();
-
-  late TextEditingController nameCtl;
-  late TextEditingController barcodeCtl;
-  late TextEditingController priceCtl;
-  late TextEditingController costCtl;
+  late final TextEditingController nameCtrl;
+  late final TextEditingController barcodeCtrl;
+  late final TextEditingController priceCtrl;
+  late final TextEditingController costCtrl;
+  String unit = 'adet';
 
   @override
   void initState() {
     super.initState();
-    final e = widget.existing;
-    nameCtl = TextEditingController(text: _nameOf(e));
-    barcodeCtl = TextEditingController(text: _barcodeOf(e) ?? '');
-    priceCtl = TextEditingController(text: _fmt(_priceOf(e)));
-    costCtl = TextEditingController(text: _fmt(_costOf(e)));
+    final p = widget.initial;
+    nameCtrl = TextEditingController(
+        text: p == null
+            ? ''
+            : _get<String>(p, const ['name', 'title', 'productName']) ?? '');
+    barcodeCtrl = TextEditingController(
+        text: p == null
+            ? ''
+            : _get<String>(
+                    p, const ['barcode', 'barCode', 'ean', 'sku', 'code']) ??
+                '');
+    final price = p == null
+        ? null
+        : _get<num>(p, const [
+            'price',
+            'sellingPrice',
+            'salePrice',
+            'unitPrice',
+            'listPrice'
+          ]);
+    final cost = p == null
+        ? null
+        : _get<num>(
+            p, const ['costPrice', 'buyPrice', 'purchasePrice', 'cost']);
+    priceCtrl = TextEditingController(
+        text: price == null ? '' : price.toDouble().toStringAsFixed(2));
+    costCtrl = TextEditingController(
+        text: cost == null ? '' : cost.toDouble().toStringAsFixed(2));
+    unit = p == null
+        ? 'adet'
+        : (_get<String>(p, const ['unit', 'uom', 'measure', 'measureUnit']) ??
+            'adet');
   }
 
   @override
   void dispose() {
-    nameCtl.dispose();
-    barcodeCtl.dispose();
-    priceCtl.dispose();
-    costCtl.dispose();
+    nameCtrl.dispose();
+    barcodeCtrl.dispose();
+    priceCtrl.dispose();
+    costCtrl.dispose();
     super.dispose();
   }
 
-  String _fmt(double? v) => v == null ? '' : v.toStringAsFixed(2);
-
-  // --- field adapters (Dialog içinden de ulaşmak için static-free kopya) ---
-  String _nameOf(Product? p) {
-    if (p == null) return '';
-    try {
-      final d = p as dynamic;
-      final v = d.name ?? d.title ?? d.productName;
-      if (v is String) return v;
-    } catch (_) {}
-    return '';
-  }
-
-  String? _barcodeOf(Product? p) {
-    if (p == null) return null;
-    try {
-      final d = p as dynamic;
-      final v = d.barcode ?? d.barCode ?? d.ean ?? d.ean13 ?? d.sku ?? d.code;
-      if (v is String) return v;
-    } catch (_) {}
-    return null;
-  }
-
-  double _priceOf(Product? p) {
-    if (p == null) return 0.0;
-    try {
-      final d = p as dynamic;
-      final v = d.price ??
-          d.sellingPrice ??
-          d.salePrice ??
-          d.unitPrice ??
-          d.listPrice;
-      if (v is num) return v.toDouble();
-    } catch (_) {}
-    return 0.0;
-  }
-
-  double? _costOf(Product? p) {
-    if (p == null) return null;
-    try {
-      final d = p as dynamic;
-      final v = d.costPrice ?? d.buyPrice ?? d.purchasePrice ?? d.cost;
-      if (v is num) return v.toDouble();
-    } catch (_) {}
-    return null;
-  }
-
-  void _setPrice(Product p, double price) {
-    final d = p as dynamic;
-    for (final key in [
-      'price',
-      'sellingPrice',
-      'salePrice',
-      'unitPrice',
-      'listPrice'
-    ]) {
-      try {
-        switch (key) {
-          case 'price':
-            d.price = price;
-            return;
-          case 'sellingPrice':
-            d.sellingPrice = price;
-            return;
-          case 'salePrice':
-            d.salePrice = price;
-            return;
-          case 'unitPrice':
-            d.unitPrice = price;
-            return;
-          case 'listPrice':
-            d.listPrice = price;
-            return;
-        }
-      } catch (_) {}
-    }
-  }
-
-  void _setCost(Product p, double cost) {
-    final d = p as dynamic;
-    for (final key in ['costPrice', 'buyPrice', 'purchasePrice', 'cost']) {
-      try {
-        switch (key) {
-          case 'costPrice':
-            d.costPrice = cost;
-            return;
-          case 'buyPrice':
-            d.buyPrice = cost;
-            return;
-          case 'purchasePrice':
-            d.purchasePrice = cost;
-            return;
-          case 'cost':
-            d.cost = cost;
-            return;
-        }
-      } catch (_) {}
-    }
-  }
-
-  void _setCreatedAt(Product p) {
-    try {
-      final d = p as dynamic;
-      d.createdAt = DateTime.now();
-    } catch (_) {}
-  }
+  Isar get _isar => ref.read(isarProvider);
 
   Future<void> _save() async {
     if (!_form.currentState!.validate()) return;
 
-    final isar = ref.read(isarProvider);
-    final e = widget.existing;
+    final price = double.tryParse(priceCtrl.text.replaceAll(',', '.')) ?? 0.0;
+    final cost = double.tryParse(costCtrl.text.replaceAll(',', '.')) ?? 0.0;
 
-    final name = nameCtl.text.trim();
-    final barcode = barcodeCtl.text.trim();
+    await _isar.writeTxn(() async {
+      final p = widget.initial ?? Product();
 
-    double parse(String s) => double.tryParse(s.replaceAll(',', '.')) ?? 0.0;
-    final price = parse(priceCtl.text.trim());
-    final cost = parse(costCtl.text.trim());
+      _set(p, 'name', nameCtrl.text.trim());
+      _set(p, 'barcode', barcodeCtrl.text.trim());
+      _set(p, 'unit', unit);
+      _set(p, 'price', price);
+      _set(p, 'costPrice', cost);
+      _set(p, 'createdAt', DateTime.now());
 
-    await isar.writeTxn(() async {
-      if (e == null) {
-        final p = Product();
-        // name alanı büyük ihtimalle var; yoksa görmezden geliriz
-        try {
-          (p as dynamic).name = name;
-        } catch (_) {}
-        try {
-          (p as dynamic).barcode = barcode.isEmpty ? null : barcode;
-        } catch (_) {
-          // başka alan adı kullanılıyorsa, sadece kaydetmeyiz
-        }
-        _setPrice(p, price);
-        _setCost(p, cost);
-        _setCreatedAt(p);
-        await isar.products.put(p);
-      } else {
-        try {
-          (e as dynamic).name = name;
-        } catch (_) {}
-        try {
-          (e as dynamic).barcode = barcode.isEmpty ? null : barcode;
-        } catch (_) {}
-        _setPrice(e, price);
-        _setCost(e, cost);
-        await isar.products.put(e);
-      }
+      await _isar.products.put(p);
     });
 
     if (!mounted) return;
-    Navigator.pop(context);
-    widget.onSaved();
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(e == null ? 'Ürün eklendi' : 'Ürün güncellendi')),
-    );
+    Navigator.pop(context, true);
   }
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: Text(widget.existing == null ? 'Yeni Ürün' : 'Ürünü Düzenle'),
-      content: Form(
+    final isEdit = widget.initial != null;
+
+    return Padding(
+      padding: EdgeInsets.only(
+        bottom: MediaQuery.of(context).viewInsets.bottom,
+        left: 16,
+        right: 16,
+        top: 16,
+      ),
+      child: Form(
         key: _form,
-        child: SizedBox(
-          width: 420,
-          child: SingleChildScrollView(
-            child: Column(
-              children: [
-                TextFormField(
-                  controller: nameCtl,
-                  decoration: const InputDecoration(
-                    labelText: 'Ürün adı',
-                    prefixIcon: Icon(Icons.inventory_2),
-                  ),
-                  validator: (v) =>
-                      (v == null || v.trim().isEmpty) ? 'Ad zorunlu' : null,
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(isEdit ? 'Ürünü Düzenle' : 'Yeni Ürün',
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Ürün adı',
+                  prefixIcon: Icon(Icons.label),
                 ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: barcodeCtl,
-                  decoration: const InputDecoration(
-                    labelText: 'Barkod (opsiyonel)',
-                    prefixIcon: Icon(Icons.qr_code_2),
-                  ),
+                validator: (v) =>
+                    (v == null || v.trim().isEmpty) ? 'Zorunlu' : null,
+              ),
+              const SizedBox(height: 8),
+              TextFormField(
+                controller: barcodeCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Barkod (opsiyonel)',
+                  prefixIcon: Icon(Icons.qr_code_2),
                 ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: priceCtl,
-                  decoration: const InputDecoration(
-                    labelText: 'Satış fiyatı (₺)',
-                    prefixIcon: Icon(Icons.sell),
-                  ),
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  validator: (v) =>
-                      (double.tryParse((v ?? '').replaceAll(',', '.')) == null)
-                          ? 'Geçerli bir sayı girin'
-                          : null,
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                value: unit,
+                decoration: const InputDecoration(
+                  labelText: 'Birim',
+                  prefixIcon: Icon(Icons.scale),
                 ),
-                const SizedBox(height: 8),
-                TextFormField(
-                  controller: costCtl,
-                  decoration: const InputDecoration(
-                    labelText: 'Maliyet (₺)',
-                    prefixIcon: Icon(Icons.account_balance_wallet_outlined),
+                items: const [
+                  DropdownMenuItem(value: 'adet', child: Text('Adet')),
+                  DropdownMenuItem(value: 'kg', child: Text('Kilogram')),
+                  DropdownMenuItem(value: 'lt', child: Text('Litre')),
+                  DropdownMenuItem(value: 'm', child: Text('Metre')),
+                  DropdownMenuItem(value: 'paket', child: Text('Paket')),
+                ],
+                onChanged: (v) => setState(() => unit = v ?? 'adet'),
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: priceCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Satış fiyatı',
+                        prefixIcon: Icon(Icons.sell),
+                        suffixText: '₺',
+                      ),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                      validator: (v) {
+                        final t = (v ?? '').trim().replaceAll(',', '.');
+                        final d = double.tryParse(t);
+                        if (d == null) return 'Geçerli sayı girin';
+                        return null;
+                      },
+                    ),
                   ),
-                  keyboardType:
-                      const TextInputType.numberWithOptions(decimal: true),
-                  validator: (v) =>
-                      (double.tryParse((v ?? '').replaceAll(',', '.')) == null)
-                          ? 'Geçerli bir sayı girin'
-                          : null,
-                ),
-              ],
-            ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextFormField(
+                      controller: costCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Maliyet (ops.)',
+                        prefixIcon: Icon(Icons.production_quantity_limits),
+                        suffixText: '₺',
+                      ),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () => Navigator.pop(context, false),
+                    icon: const Icon(Icons.close),
+                    label: const Text('İptal'),
+                  ),
+                  const Spacer(),
+                  FilledButton.icon(
+                    onPressed: _save,
+                    icon: const Icon(Icons.save),
+                    label: Text(isEdit ? 'Kaydet' : 'Ekle'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
           ),
         ),
       ),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('İptal')),
-        FilledButton.icon(
-            onPressed: _save,
-            icon: const Icon(Icons.save),
-            label: const Text('Kaydet')),
-      ],
     );
+  }
+}
+
+/* ----------------- Dinamik alan yardımcıları ----------------- */
+
+T? _get<T>(Product p, List<String> names) {
+  final d = p as dynamic;
+  for (final n in names) {
+    try {
+      dynamic v;
+      switch (n) {
+        case 'name':
+          v = d.name;
+          break;
+        case 'title':
+          v = d.title;
+          break;
+        case 'productName':
+          v = d.productName;
+          break;
+        case 'barcode':
+          v = d.barcode;
+          break;
+        case 'barCode':
+          v = d.barCode;
+          break;
+        case 'ean':
+          v = d.ean;
+          break;
+        case 'sku':
+          v = d.sku;
+          break;
+        case 'code':
+          v = d.code;
+          break;
+        case 'unit':
+          v = d.unit;
+          break;
+        case 'uom':
+          v = d.uom;
+          break;
+        case 'measure':
+          v = d.measure;
+          break;
+        case 'measureUnit':
+          v = d.measureUnit;
+          break;
+
+        case 'price':
+          v = d.price;
+          break;
+        case 'sellingPrice':
+          v = d.sellingPrice;
+          break;
+        case 'salePrice':
+          v = d.salePrice;
+          break;
+        case 'unitPrice':
+          v = d.unitPrice;
+          break;
+        case 'listPrice':
+          v = d.listPrice;
+          break;
+
+        case 'costPrice':
+          v = d.costPrice;
+          break;
+        case 'buyPrice':
+          v = d.buyPrice;
+          break;
+        case 'purchasePrice':
+          v = d.purchasePrice;
+          break;
+        case 'cost':
+          v = d.cost;
+          break;
+
+        case 'createdAt':
+          v = d.createdAt;
+          break;
+        default:
+          v = null;
+      }
+      if (v == null) continue;
+      if (v is T) return v;
+      if (T == double && v is num) return v.toDouble() as T;
+      if (T == num && (v is int || v is double)) return v as T;
+      if (T == String) return v.toString() as T;
+      if (T == DateTime && v is String) return DateTime.tryParse(v) as T?;
+    } catch (_) {
+      // alan yoksa sonraki isme dene
+    }
+  }
+  return null;
+}
+
+void _set(Product p, String name, Object? value) {
+  if (value == null) return;
+  final d = p as dynamic;
+  try {
+    switch (name) {
+      case 'name':
+        d.name = value;
+        break;
+      case 'barcode':
+        d.barcode = value;
+        break;
+      case 'unit':
+        d.unit = value;
+        break;
+      case 'price':
+        d.price = value;
+        break;
+      case 'costPrice':
+        d.costPrice = value;
+        break;
+      case 'createdAt':
+        d.createdAt = value;
+        break;
+      default:
+        break;
+    }
+  } catch (_) {
+    // modelde alan yoksa sessiz geç
   }
 }

@@ -10,7 +10,7 @@ import 'core/role_gate.dart';
 import 'core/auth_controller.dart';
 import 'models/app_user.dart';
 
-// Isar (auto-backup için lazım)
+// Isar (auto-backup için)
 import 'data/local/isar_service.dart';
 
 // Ekranlar
@@ -27,6 +27,9 @@ import 'features/auth/change_pin_dialog.dart';
 
 // Backup servisi
 import 'core/backup_service.dart';
+
+// Login Gate ekranı
+import 'features/auth/login_gate_page.dart';
 
 class MiniPOSApp extends ConsumerWidget {
   const MiniPOSApp({super.key});
@@ -46,38 +49,113 @@ class MiniPOSApp extends ConsumerWidget {
         '/license': (_) => const LicenseKeyPage(),
         '/login': (_) => const LoginPage(),
         '/users': (_) => const UserManagementPage(),
-        '/backup': (_) => const BackupPage(), // ✅ Yedekleme sayfası
+        '/backup': (_) => const BackupPage(),
       },
-      home: const _Home(),
+      home: const _RootGate(),
     );
   }
 }
 
-class _Home extends ConsumerStatefulWidget {
-  const _Home();
+/// Açılışta servisleri hazırlar ve kimliğe göre ekrana karar verir.
+class _RootGate extends ConsumerStatefulWidget {
+  const _RootGate();
+
   @override
-  ConsumerState<_Home> createState() => _HomeState();
+  ConsumerState<_RootGate> createState() => _RootGateState();
 }
 
-class _HomeState extends ConsumerState<_Home> {
-  int idx = 0;
+class _RootGateState extends ConsumerState<_RootGate> {
+  bool _ready = false;
 
   @override
   void initState() {
     super.initState();
-    // Uygulama açılışında otomatik günlük yedek (gerekliyse) sessizce çalıştır.
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      final isar = ref.read(isarProvider);
-      await BackupService.instance.runDailyBackupIfNeeded(isar);
-    });
+    _bootstrap();
   }
+
+  Future<void> _bootstrap() async {
+    // Servisler
+    await IsarService.instance.init();
+    await LicenseService().init();
+
+    // Sessiz otomatik günlük yedek
+    final isar = IsarService.instance.db;
+    await BackupService.instance.runDailyBackupIfNeeded(isar);
+
+    if (mounted) setState(() => _ready = true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_ready) {
+      return const _Splash();
+    }
+
+    final auth = ref.watch(authControllerProvider);
+    final user = auth.user;
+
+    // Kullanıcı yoksa: Login Gate
+    if (user == null) {
+      return const LoginGatePage();
+    }
+
+    // Kullanıcı varsa: Ana kabuk
+    return const _MainShell();
+  }
+}
+
+/// Açılış Splash
+class _Splash extends StatelessWidget {
+  const _Splash();
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: DecoratedBox(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF0ea5e9), Color(0xFF9333ea)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: const [
+              Icon(Icons.storefront, size: 64, color: Colors.white),
+              SizedBox(height: 16),
+              Text('MiniPOS',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 26,
+                      fontWeight: FontWeight.w700)),
+              SizedBox(height: 18),
+              CircularProgressIndicator(color: Colors.white),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Ana uygulama kabuğu (giriş sonrası)
+class _MainShell extends ConsumerStatefulWidget {
+  const _MainShell();
+
+  @override
+  ConsumerState<_MainShell> createState() => _MainShellState();
+}
+
+class _MainShellState extends ConsumerState<_MainShell> {
+  int idx = 0;
 
   @override
   Widget build(BuildContext context) {
     final auth = ref.watch(authControllerProvider);
     final u = auth.user;
 
-    // Raporlar sekmesini RoleGate ile yalnızca YÖNETİCİye aç
     final pages = <Widget>[
       const ProductsListPage(),
       const POSPage(),
@@ -89,7 +167,7 @@ class _HomeState extends ConsumerState<_Home> {
       appBar: AppBar(
         title: const Text('MiniPOS'),
         actions: [
-          // Kullanıcı çipi (giriş/menü)
+          // Kullanıcı çipi (menü)
           Padding(
             padding: const EdgeInsets.only(right: 8),
             child: ActionChip(
@@ -140,7 +218,6 @@ class _HomeState extends ConsumerState<_Home> {
       builder: (_) => SafeArea(
         child: Wrap(
           children: [
-            // ✅ Yedekleme / Geri Yükleme (herkese açık; istersen yöneticiyi şart koşabilirsin)
             ListTile(
               leading: const Icon(Icons.backup),
               title: const Text('Yedekleme / Geri Yükleme'),
@@ -149,7 +226,7 @@ class _HomeState extends ConsumerState<_Home> {
                 Navigator.pushNamed(context, '/backup');
               },
             ),
-            if (me?.role == UserRole.manager) // ✅ Yalnızca yönetici
+            if (me?.role == UserRole.manager)
               ListTile(
                 leading: const Icon(Icons.group),
                 title: const Text('Kullanıcı Yönetimi'),
@@ -176,8 +253,7 @@ class _HomeState extends ConsumerState<_Home> {
                     context: context,
                     builder: (_) => ChangePinDialog(
                       targetUser: me,
-                      requireOldPin:
-                          true, // kendi PIN’ini değiştirirken mevcut PIN istenir
+                      requireOldPin: true,
                     ),
                   );
                 },
