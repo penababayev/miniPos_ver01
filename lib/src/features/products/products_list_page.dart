@@ -6,6 +6,7 @@ import '../../data/local/isar_service.dart';
 import '../../core/auth_controller.dart';
 import '../../models/app_user.dart';
 import '../../models/product.dart';
+import 'product_meta_service.dart';
 
 class ProductsListPage extends ConsumerStatefulWidget {
   const ProductsListPage({super.key});
@@ -17,13 +18,16 @@ class ProductsListPage extends ConsumerStatefulWidget {
 class _ProductsListPageState extends ConsumerState<ProductsListPage> {
   final _q = TextEditingController();
   bool _loading = true;
-  List<Product> _items = [];
+  List<Product> _all = [];
+  Map<int, Map<String, dynamic>> _meta = {};
+  List<String> _cats = [];
+  String _cat = 'Hepsi';
 
   @override
   void initState() {
     super.initState();
-    _load();
-    _q.addListener(_load);
+    _reload();
+    _q.addListener(() => setState(() {}));
   }
 
   @override
@@ -34,37 +38,62 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
 
   Isar get _isar => ref.read(isarProvider);
 
-  Future<void> _load() async {
+  Future<void> _reload() async {
+    if (!mounted) return;
     setState(() => _loading = true);
+    try {
+      final prods = await _isar.products.where().findAll();
+      final meta = await ProductMetaService.instance.allMeta();
+      final cats = await ProductMetaService.instance.categories();
 
-    final all = await _isar.products
-        .where()
-        .findAll(); // sortByName kullanma -> her modelde yok
-    final text = _q.text.trim().toLowerCase();
+      prods.sort((a, b) => _name(a).compareTo(_name(b)));
 
-    List<Product> list = all;
-    if (text.isNotEmpty) {
-      list = all.where((p) {
-        final name =
-            (_get<String>(p, const ['name', 'title', 'productName']) ?? '')
-                .toLowerCase();
-        final bc = (_get<String>(
-                    p, const ['barcode', 'barCode', 'ean', 'sku', 'code']) ??
-                '')
-            .toLowerCase();
-        return name.contains(text) || bc.contains(text);
-      }).toList();
+      if (!mounted) return;
+      setState(() {
+        _all = prods;
+        _meta = meta;
+        _cats = cats;
+        if (!_cats.contains(_cat) && _cat != 'Hepsi') _cat = 'Hepsi';
+      });
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ürünler yüklenemedi: $e')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
+  }
 
-    list.sort((a, b) {
-      final an = _get<String>(a, const ['name', 'title', 'productName']) ?? '';
-      final bn = _get<String>(b, const ['name', 'title', 'productName']) ?? '';
-      return an.compareTo(bn);
-    });
+  String _name(Product p) =>
+      _get<String>(p, const ['name', 'title', 'productName']) ?? '';
 
-    setState(() {
-      _items = list;
-      _loading = false;
+  String? _barcode(Product p) =>
+      _get<String>(p, const ['barcode', 'barCode', 'ean', 'sku', 'code']);
+
+  String _unit(Product p) =>
+      _get<String>(p, const ['unit', 'uom', 'measure', 'measureUnit']) ?? '';
+
+  double _price(Product p) =>
+      (_get<num>(p, const [
+        'price',
+        'sellingPrice',
+        'salePrice',
+        'unitPrice',
+        'listPrice'
+      ])?.toDouble()) ??
+      0.0;
+
+  Iterable<Product> _filtered() {
+    final q = _q.text.trim().toLowerCase();
+    return _all.where((p) {
+      final n = _name(p).toLowerCase();
+      final b = (_barcode(p) ?? '').toLowerCase();
+      final cat = (_meta[p.id]?['category'] as String?)?.toLowerCase() ?? '';
+      final okQ = q.isEmpty || n.contains(q) || b.contains(q);
+      final okC = _cat == 'Hepsi' || cat == _cat.toLowerCase();
+      return okQ && okC;
     });
   }
 
@@ -73,10 +102,14 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (_) => ProductEditorSheet(initial: product),
+      builder: (_) => ProductEditorSheet(
+        initial: product,
+        meta: _meta[product?.id ?? 0],
+        knownCategories: _cats,
+      ),
     );
     if (ok == true) {
-      await _load();
+      await _reload();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -91,9 +124,7 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Silinsin mi?'),
-        content: Text('"${_get<String>(p, const [
-                  'name'
-                ]) ?? '(adsız)'}" ürünü silinecek.'),
+        content: Text('"${_name(p)}" ürünü silinecek.'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -106,7 +137,7 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
     );
     if (yes != true) return;
     await _isar.writeTxn(() async => _isar.products.delete(p.id));
-    _load();
+    _reload();
   }
 
   @override
@@ -114,12 +145,15 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
     final me = ref.watch(authControllerProvider).user;
     final canEdit = me?.role == UserRole.manager;
 
+    final items = _filtered().toList();
+
     return Scaffold(
       body: Padding(
         padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // Başlık + Ekle
             Row(
               children: [
                 const Text('Ürünler',
@@ -135,6 +169,7 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
               ],
             ),
             const SizedBox(height: 10),
+            // Arama
             TextField(
               controller: _q,
               decoration: InputDecoration(
@@ -149,11 +184,39 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
                     const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               ),
             ),
-            const SizedBox(height: 8),
+            // Kategori çipleri
+            if (_cats.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                height: 40,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(right: 6),
+                      child: ChoiceChip(
+                        label: const Text('Hepsi'),
+                        selected: _cat == 'Hepsi',
+                        onSelected: (_) => setState(() => _cat = 'Hepsi'),
+                      ),
+                    ),
+                    ..._cats.map((c) => Padding(
+                          padding: const EdgeInsets.only(right: 6),
+                          child: ChoiceChip(
+                            label: Text(c),
+                            selected: _cat.toLowerCase() == c.toLowerCase(),
+                            onSelected: (_) => setState(() => _cat = c),
+                          ),
+                        )),
+                  ],
+                ),
+              ),
+            ],
+            const SizedBox(height: 6),
             Expanded(
               child: _loading
                   ? const Center(child: CircularProgressIndicator())
-                  : _items.isEmpty
+                  : items.isEmpty
                       ? Center(
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
@@ -170,45 +233,43 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
                           ),
                         )
                       : ListView.separated(
-                          itemCount: _items.length,
+                          itemCount: items.length,
                           separatorBuilder: (_, __) => const Divider(height: 1),
                           itemBuilder: (_, i) {
-                            final p = _items[i];
-                            final name = _get<String>(p,
-                                    const ['name', 'title', 'productName']) ??
-                                '(adsız)';
-                            final barcode = _get<String>(p, const [
-                              'barcode',
-                              'barCode',
-                              'ean',
-                              'sku',
-                              'code'
-                            ]);
-                            final unit = _get<String>(p, const [
-                                  'unit',
-                                  'uom',
-                                  'measure',
-                                  'measureUnit'
-                                ]) ??
-                                '';
-                            final price = (_get<num>(p, const [
-                                  'price',
-                                  'sellingPrice',
-                                  'salePrice',
-                                  'unitPrice',
-                                  'listPrice'
-                                ])?.toDouble()) ??
-                                0.0;
+                            final p = items[i];
+                            final m = _meta[p.id];
+                            final cat = (m?['category'] as String?) ?? '';
+                            final avatar = FutureBuilder(
+                              future: ProductMetaService.instance
+                                  .imageProviderOf(p.id),
+                              builder: (_, snap) {
+                                final prov = snap.data as ImageProvider?;
+                                if (prov == null) {
+                                  return const CircleAvatar(
+                                      child: Icon(Icons.image_not_supported));
+                                }
+                                return CircleAvatar(backgroundImage: prov);
+                              },
+                            );
+
+                            // stok göstermek istersen (modelinde varsa) oku:
+                            final onHand = _get<num>(
+                                p, const ['currentStock', 'stock', 'onHand']);
 
                             return ListTile(
-                              leading: const Icon(Icons.inventory_2),
-                              title: Text(name),
+                              leading: SizedBox(
+                                  width: 48, height: 48, child: avatar),
+                              title:
+                                  Text(_name(p).isEmpty ? '(adsız)' : _name(p)),
                               subtitle: Text([
-                                if ((barcode ?? '').isNotEmpty)
-                                  'Barkod: $barcode',
-                                if (unit.isNotEmpty) 'Birim: $unit',
+                                if ((_barcode(p) ?? '').isNotEmpty)
+                                  'Barkod: ${_barcode(p)}',
+                                if (cat.isNotEmpty) 'Kategori: $cat',
+                                if (_unit(p).isNotEmpty) 'Birim: ${_unit(p)}',
+                                if (onHand != null)
+                                  'Stok: ${onHand.toString()}',
                               ].join(' • ')),
-                              trailing: Text(price.toStringAsFixed(2)),
+                              trailing: Text(_price(p).toStringAsFixed(2)),
                               onTap:
                                   canEdit ? () => _addOrEdit(product: p) : null,
                               onLongPress: canEdit ? () => _delete(p) : null,
@@ -230,10 +291,18 @@ class _ProductsListPageState extends ConsumerState<ProductsListPage> {
   }
 }
 
-/// Ürün ekleme/düzenleme sayfası (bottom sheet)
+/// Ürün ekleme/düzenleme (kategori + resim + stok)
 class ProductEditorSheet extends ConsumerStatefulWidget {
-  const ProductEditorSheet({super.key, this.initial});
+  const ProductEditorSheet({
+    super.key,
+    this.initial,
+    this.meta,
+    required this.knownCategories,
+  });
+
   final Product? initial;
+  final Map<String, dynamic>? meta;
+  final List<String> knownCategories;
 
   @override
   ConsumerState<ProductEditorSheet> createState() => _ProductEditorSheetState();
@@ -245,7 +314,12 @@ class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
   late final TextEditingController barcodeCtrl;
   late final TextEditingController priceCtrl;
   late final TextEditingController costCtrl;
+  late final TextEditingController categoryCtrl;
+  late final TextEditingController stockCtrl;
+  late final TextEditingController minStockCtrl;
+
   String unit = 'adet';
+  ImageProvider? _preview;
 
   @override
   void initState() {
@@ -282,6 +356,28 @@ class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
         ? 'adet'
         : (_get<String>(p, const ['unit', 'uom', 'measure', 'measureUnit']) ??
             'adet');
+    categoryCtrl = TextEditingController(
+        text: (widget.meta?['category'] as String?) ?? '');
+
+    final onHand = p == null
+        ? null
+        : _get<num>(p, const ['currentStock', 'stock', 'onHand']);
+    final minSt = p == null
+        ? null
+        : _get<num>(p, const ['minStock', 'reorderLevel', 'minQty']);
+    stockCtrl =
+        TextEditingController(text: onHand == null ? '' : onHand.toString());
+    minStockCtrl =
+        TextEditingController(text: minSt == null ? '' : minSt.toString());
+
+    _loadPreview();
+  }
+
+  Future<void> _loadPreview() async {
+    if (widget.initial == null) return;
+    final prov =
+        await ProductMetaService.instance.imageProviderOf(widget.initial!.id);
+    if (mounted) setState(() => _preview = prov);
   }
 
   @override
@@ -290,37 +386,77 @@ class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
     barcodeCtrl.dispose();
     priceCtrl.dispose();
     costCtrl.dispose();
+    categoryCtrl.dispose();
+    stockCtrl.dispose();
+    minStockCtrl.dispose();
     super.dispose();
   }
 
   Isar get _isar => ref.read(isarProvider);
 
-  Future<void> _save() async {
+  Future<void> _save({bool closeSheet = true}) async {
     if (!_form.currentState!.validate()) return;
 
     final price = double.tryParse(priceCtrl.text.replaceAll(',', '.')) ?? 0.0;
     final cost = double.tryParse(costCtrl.text.replaceAll(',', '.')) ?? 0.0;
+    final initStock =
+        double.tryParse(stockCtrl.text.replaceAll(',', '.')) ?? 0.0;
+    final minStock =
+        double.tryParse(minStockCtrl.text.replaceAll(',', '.')) ?? 0.0;
+
+    int id = widget.initial?.id ?? 0;
 
     await _isar.writeTxn(() async {
       final p = widget.initial ?? Product();
-
       _set(p, 'name', nameCtrl.text.trim());
       _set(p, 'barcode', barcodeCtrl.text.trim());
       _set(p, 'unit', unit);
       _set(p, 'price', price);
       _set(p, 'costPrice', cost);
-      _set(p, 'createdAt', DateTime.now());
-
-      await _isar.products.put(p);
+      _set(p, 'currentStock', initStock); // varsa yaz
+      _set(p, 'stock', initStock);
+      _set(p, 'onHand', initStock);
+      _set(p, 'minStock', minStock);
+      if (widget.initial == null) _set(p, 'createdAt', DateTime.now());
+      id = await _isar.products.put(p);
     });
 
+    await ProductMetaService.instance.setCategory(id, categoryCtrl.text.trim());
+
     if (!mounted) return;
-    Navigator.pop(context, true);
+    if (closeSheet) {
+      Navigator.pop(context, true);
+    } else {
+      // Yeni eklemeye devam: alanları sıfırla
+      setState(() {
+        nameCtrl.clear();
+        barcodeCtrl.clear();
+        priceCtrl.clear();
+        costCtrl.clear();
+        categoryCtrl.clear();
+        stockCtrl.clear();
+        minStockCtrl.clear();
+        unit = 'adet';
+        _preview = null;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Ürün eklendi')),
+      );
+    }
+  }
+
+  Future<void> _pickImage() async {
+    if (widget.initial == null) return; // yeni üründe önce kaydet
+    final id = widget.initial!.id;
+    await ProductMetaService.instance.pickAndSaveImage(context, id);
+    final prov = await ProductMetaService.instance.imageProviderOf(id);
+    if (mounted) setState(() => _preview = prov);
   }
 
   @override
   Widget build(BuildContext context) {
     final isEdit = widget.initial != null;
+    final cats = widget.knownCategories;
 
     return Padding(
       padding: EdgeInsets.only(
@@ -338,7 +474,48 @@ class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
               Text(isEdit ? 'Ürünü Düzenle' : 'Yeni Ürün',
                   style: const TextStyle(
                       fontSize: 18, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 10),
+
+              // Resim
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 32,
+                    backgroundImage: _preview,
+                    child: _preview == null
+                        ? const Icon(Icons.image, size: 32)
+                        : null,
+                  ),
+                  const SizedBox(width: 12),
+                  FilledButton.icon(
+                    onPressed: isEdit ? _pickImage : null,
+                    icon: const Icon(Icons.photo),
+                    label: const Text('Resim seç'),
+                  ),
+                  const SizedBox(width: 8),
+                  if (_preview != null)
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        if (widget.initial == null) return;
+                        await ProductMetaService.instance
+                            .clearImage(widget.initial!.id);
+                        setState(() => _preview = null);
+                      },
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('Kaldır'),
+                    ),
+                ],
+              ),
+              if (!isEdit)
+                const Padding(
+                  padding: EdgeInsets.only(left: 8, top: 6),
+                  child: Text(
+                    'Önce ürünü kaydedin, sonra resim ekleyin.',
+                    style: TextStyle(fontSize: 12, color: Colors.black54),
+                  ),
+                ),
               const SizedBox(height: 12),
+
               TextFormField(
                 controller: nameCtrl,
                 decoration: const InputDecoration(
@@ -357,6 +534,30 @@ class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
                 ),
               ),
               const SizedBox(height: 8),
+
+              // Kategori (yaz + öneri)
+              Autocomplete<String>(
+                initialValue: TextEditingValue(text: categoryCtrl.text),
+                optionsBuilder: (TextEditingValue t) {
+                  final q = t.text.toLowerCase();
+                  return cats.where((e) => e.toLowerCase().contains(q));
+                },
+                onSelected: (v) => categoryCtrl.text = v,
+                fieldViewBuilder: (ctx, textCtrl, focus, onSubmit) {
+                  textCtrl.text = categoryCtrl.text;
+                  textCtrl.addListener(() => categoryCtrl.text = textCtrl.text);
+                  return TextField(
+                    controller: textCtrl,
+                    focusNode: focus,
+                    decoration: const InputDecoration(
+                      labelText: 'Kategori',
+                      prefixIcon: Icon(Icons.category),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 8),
+
               DropdownButtonFormField<String>(
                 value: unit,
                 decoration: const InputDecoration(
@@ -373,6 +574,8 @@ class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
                 onChanged: (v) => setState(() => unit = v ?? 'adet'),
               ),
               const SizedBox(height: 8),
+
+              // Fiyat & Maliyet
               Row(
                 children: [
                   Expanded(
@@ -408,7 +611,39 @@ class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
                   ),
                 ],
               ),
+              const SizedBox(height: 8),
+
+              // Stok alanları
+              Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      controller: stockCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Başlangıç Stoğu',
+                        prefixIcon: Icon(Icons.inventory_2),
+                      ),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: TextFormField(
+                      controller: minStockCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Minimum Stok',
+                        prefixIcon: Icon(Icons.warning_amber),
+                      ),
+                      keyboardType:
+                          const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ),
+                ],
+              ),
+
               const SizedBox(height: 12),
+
               Row(
                 children: [
                   OutlinedButton.icon(
@@ -417,10 +652,18 @@ class _ProductEditorSheetState extends ConsumerState<ProductEditorSheet> {
                     label: const Text('İptal'),
                   ),
                   const Spacer(),
+                  // Kaydet + Yeni (yalnızca yeni oluştururken)
+                  if (widget.initial == null) ...[
+                    OutlinedButton(
+                      onPressed: () => _save(closeSheet: false),
+                      child: const Text('Kaydet + Yeni'),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   FilledButton.icon(
-                    onPressed: _save,
+                    onPressed: () => _save(),
                     icon: const Icon(Icons.save),
-                    label: Text(isEdit ? 'Kaydet' : 'Ekle'),
+                    label: Text(widget.initial != null ? 'Kaydet' : 'Ekle'),
                   ),
                 ],
               ),
@@ -507,6 +750,19 @@ T? _get<T>(Product p, List<String> names) {
           v = d.cost;
           break;
 
+        case 'currentStock':
+          v = d.currentStock;
+          break;
+        case 'stock':
+          v = d.stock;
+          break;
+        case 'onHand':
+          v = d.onHand;
+          break;
+        case 'minStock':
+          v = d.minStock;
+          break;
+
         case 'createdAt':
           v = d.createdAt;
           break;
@@ -519,9 +775,7 @@ T? _get<T>(Product p, List<String> names) {
       if (T == num && (v is int || v is double)) return v as T;
       if (T == String) return v.toString() as T;
       if (T == DateTime && v is String) return DateTime.tryParse(v) as T?;
-    } catch (_) {
-      // alan yoksa sonraki isme dene
-    }
+    } catch (_) {}
   }
   return null;
 }
@@ -546,13 +800,25 @@ void _set(Product p, String name, Object? value) {
       case 'costPrice':
         d.costPrice = value;
         break;
+
+      case 'currentStock':
+        d.currentStock = value;
+        break;
+      case 'stock':
+        d.stock = value;
+        break;
+      case 'onHand':
+        d.onHand = value;
+        break;
+      case 'minStock':
+        d.minStock = value;
+        break;
+
       case 'createdAt':
         d.createdAt = value;
         break;
       default:
         break;
     }
-  } catch (_) {
-    // modelde alan yoksa sessiz geç
-  }
+  } catch (_) {/* model alanı yoksa sessizce geç */}
 }
